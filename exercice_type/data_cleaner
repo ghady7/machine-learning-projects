@@ -1,0 +1,159 @@
+import pandas as pd
+import re
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
+import joblib
+import os
+
+# =========================
+# 1️⃣ Helper Functions
+# =========================
+def clean_text(text):
+    """Lowercase, remove punctuation, normalize spaces"""
+    text = str(text).lower()
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def generate_exercise_type(row):
+    equipment = str(row["Equipment"]).lower()
+    name = str(row["Title"]).lower()
+
+    if equipment == "other":
+        return None  # remove unwanted rows in training
+
+    # BW+W
+    bw_weight_keywords = ["weighted", "vest", "plate", "load"]
+    if any(k in name for k in bw_weight_keywords) and equipment not in ["machine", "cable"]:
+        return "BW+W"
+
+    # Bodyweight only
+    if equipment in ["body only", "none"]:
+        return "BW"
+
+    # Machine / cable
+    if equipment in ["machine", "cable"]:
+        return "M"
+
+    # Weighted
+    weighted_equipment = [
+        "barbell", "dumbbell", "kettlebells",
+        "e-z curl bar", "medicine ball",
+        "bands", "exercise ball"
+    ]
+    if equipment in weighted_equipment:
+        return "W"
+
+    return "W"
+
+def predict_exercise_type(ex_titles, ex_descs=None):
+    """Predict exercise type for a list of titles/descriptions"""
+    clf = joblib.load("exercise_type_model_best.pkl")
+    vec = joblib.load("tfidf_vectorizer_best.pkl")
+
+    if ex_descs:
+        texts = [clean_text(t) + ' ' + clean_text(d) for t, d in zip(ex_titles, ex_descs)]
+    else:
+        texts = [clean_text(t) for t in ex_titles]
+
+    X_new = vec.transform(texts)
+    return list(clf.predict(X_new))
+
+# =========================
+# 2️⃣ Load & Clean Training Data
+# =========================
+df = pd.read_csv("exercises.csv", encoding="utf-8-sig")
+df["exercise_type"] = df.apply(generate_exercise_type, axis=1)
+df = df.dropna(subset=["exercise_type"])  # remove rows with Equipment = "other"
+print(f"✔ Cleaned dataset: {len(df)} exercises remain.")
+
+# Save cleaned CSV for reference
+df.to_csv("exercises_cleaned_labeled.csv", index=False, encoding="utf-8-sig")
+print("✔ Cleaned and labeled exercises saved as 'exercises_cleaned_labeled.csv'")
+
+# =========================
+# 3️⃣ Prepare Features
+# =========================
+df['text_features'] = df['Title'].apply(clean_text) + ' ' + df['Desc'].apply(clean_text)
+X = df['text_features']
+y = df['exercise_type']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# =========================
+# 4️⃣ TF-IDF Vectorization
+# =========================
+vectorizer = TfidfVectorizer(
+    lowercase=True,
+    stop_words='english',
+    ngram_range=(1,3),
+    min_df=2,
+    max_features=5000
+)
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+# =========================
+# 5️⃣ Train Random Forest
+# =========================
+model = RandomForestClassifier(
+    n_estimators=500,
+    max_depth=None,
+    min_samples_leaf=1,
+    max_features='sqrt',
+    random_state=42,
+    class_weight='balanced'
+)
+model.fit(X_train_vec, y_train)
+
+# =========================
+# 6️⃣ Evaluate
+# =========================
+y_pred = model.predict(X_test_vec)
+print("\nAccuracy on test set:", accuracy_score(y_test, y_pred))
+print("\nClassification Report:\n", classification_report(y_test, y_pred))
+
+# =========================
+# 7️⃣ Save Model & Vectorizer
+# =========================
+joblib.dump(model, "exercise_type_model_best.pkl")
+joblib.dump(vectorizer, "tfidf_vectorizer_best.pkl")
+print("\n✔ Best model and vectorizer saved.")
+
+# =========================
+# 8️⃣ Handle New CSV (Automatic)
+# =========================
+if __name__ == "__main__":
+    # Example manual prediction (optional)
+    example_titles = ["Weighted Pull-Up", "Push-Up", "Leg Press", "Barbell Curl", "Bodyweight Squat"]
+    example_descs = [
+        "Pull-up with added weight",
+        "Classic push-up exercise",
+        "Machine leg press exercise",
+        "Barbell curl for biceps",
+        "Bodyweight squat for legs"
+    ]
+    preds = predict_exercise_type(example_titles, example_descs)
+    print("\nPredictions for example exercises:")
+    for ex, t in zip(example_titles, preds):
+        print(f"{ex} → {t}")
+
+    # Automatic new CSV prediction
+    new_csv = "new_app_data.csv"
+    if os.path.exists(new_csv):
+        df_new = pd.read_csv(new_csv, encoding="utf-8-sig")
+
+        if 'Title' in df_new.columns and 'Desc' in df_new.columns:
+            # Only add a new column; do NOT remove any existing columns
+            df_new['exercise_type'] = predict_exercise_type(df_new['Title'].tolist(),
+                                                            df_new['Desc'].tolist())
+            df_new.to_csv("new_app_data_labeled.csv", index=False, encoding="utf-8-sig")
+            print("✔ New exercises labeled and saved as 'new_app_data_labeled.csv'")
+        else:
+            print("❌ CSV must have 'Title' and 'Desc' columns.")
+    else:
+        print("ℹ No new CSV found — skipping prediction on new data.")
